@@ -408,7 +408,8 @@ RULES:
 - concours_detail must use VERIFIED data from the knowledge base — never invent numbers
 - global_perspective must be honest and specific — not generic encouragement
 - Reference the student's actual answers in the "why" field
-- If q25 dream is specific, weight it heavily`;
+- If q25 dream is specific, weight it heavily
+- CRITICAL JSON RULES: Use only straight double quotes. Never use curly quotes or special quote characters. Escape any apostrophe inside a string value as \' or rephrase to avoid it. Do not use line breaks inside JSON string values. Ensure all braces and brackets are balanced.`;
 
     try {
       const message = await client.messages.create({
@@ -417,12 +418,32 @@ RULES:
         messages: [{ role: 'user', content: prompt }]
       });
       const rawText = message.content[0].text;
-      // Robustly extract JSON - handle cases where AI adds text before/after
-      let raw = rawText;
-      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) raw = jsonMatch[0];
-      else raw = rawText.replace(/^```json\s*/,'').replace(/\s*```$/,'').trim();
-      return res.status(200).json(JSON.parse(raw));
+      let parsed;
+      try {
+        // Attempt 1: direct parse
+        parsed = JSON.parse(rawText);
+      } catch(_) {
+        try {
+          // Attempt 2: strip markdown fences
+          const stripped = rawText.replace(/^```json\s*/,'').replace(/```\s*$/,'').trim();
+          parsed = JSON.parse(stripped);
+        } catch(_2) {
+          try {
+            // Attempt 3: extract outermost {...} block
+            const m = rawText.match(/\{[\s\S]*\}/);
+            if (!m) throw new Error('No JSON object found in response');
+            parsed = JSON.parse(m[0]);
+          } catch(e3) {
+            // Attempt 4: sanitize control characters then try again
+            const sanitized = rawText
+              .replace(/[\u0000-\u001F\u007F]/g, ' ')
+              .replace(/^[^{]*/,'')
+              .replace(/[^}]*$/,'');
+            parsed = JSON.parse(sanitized);
+          }
+        }
+      }
+      return res.status(200).json(parsed);
     } catch (err) {
       console.error('Match API error:', err?.message || err);
       return res.status(500).json({ error: 'Failed to generate results: ' + (err?.message || 'Unknown error') });
@@ -501,7 +522,9 @@ Return ONLY valid JSON:
   "insider_tips": ["tip 1", "tip 2", "tip 3"]
 }
 
-Use ONLY verified data from the knowledge base. If specific data is not in the knowledge base, say "to be confirmed with institution" rather than inventing figures.`;
+Use ONLY verified data from the knowledge base. If specific data is not in the knowledge base, say "to be confirmed with institution" rather than inventing figures.
+
+CRITICAL: Return ONLY raw JSON. No markdown. No text before or after. Use straight double quotes only. Escape apostrophes by rephrasing (e.g. "it is" not "it's"). No line breaks inside string values. All braces balanced.`;
 
     try {
       const message = await client.messages.create({
@@ -510,12 +533,32 @@ Use ONLY verified data from the knowledge base. If specific data is not in the k
         messages: [{ role: 'user', content: prompt }]
       });
       const rawText = message.content[0].text;
-      // Robustly extract JSON - handle cases where AI adds text before/after
-      let raw = rawText;
-      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) raw = jsonMatch[0];
-      else raw = rawText.replace(/^```json\s*/,'').replace(/\s*```$/,'').trim();
-      return res.status(200).json(JSON.parse(raw));
+      let parsed;
+      try {
+        // Attempt 1: direct parse
+        parsed = JSON.parse(rawText);
+      } catch(_) {
+        try {
+          // Attempt 2: strip markdown fences
+          const stripped = rawText.replace(/^```json\s*/,'').replace(/```\s*$/,'').trim();
+          parsed = JSON.parse(stripped);
+        } catch(_2) {
+          try {
+            // Attempt 3: extract outermost {...} block
+            const m = rawText.match(/\{[\s\S]*\}/);
+            if (!m) throw new Error('No JSON object found in response');
+            parsed = JSON.parse(m[0]);
+          } catch(e3) {
+            // Attempt 4: sanitize control characters then try again
+            const sanitized = rawText
+              .replace(/[\u0000-\u001F\u007F]/g, ' ')
+              .replace(/^[^{]*/,'')
+              .replace(/[^}]*$/,'');
+            parsed = JSON.parse(sanitized);
+          }
+        }
+      }
+      return res.status(200).json(parsed);
     } catch (err) {
       console.error('Concours API error:', err?.message || err);
       return res.status(500).json({ error: 'Failed to load concours guide: ' + (err?.message || 'Unknown error') });
@@ -588,7 +631,9 @@ Return ONLY valid JSON:
   "reality_check": "3-4 sentences of honest, direct advice: what are the real opportunities and realistic challenges for a Cameroonian student in this field? What should they know before committing?",
   "opportunity_hotspots": ["where in the world are Cameroonians in this field most successfully building careers?"],
   "cameroonian_advantage": "1-2 sentences: what unique advantage does being a bilingual Cameroonian give in this field globally?"
-}`;
+}
+
+CRITICAL: Return ONLY raw JSON. No markdown fences. No text before or after. Straight double quotes only. Rephrase to avoid apostrophes (use "it is" not "it's"). All braces balanced.`;
 
     try {
       const message = await client.messages.create({
@@ -597,12 +642,32 @@ Return ONLY valid JSON:
         messages: [{ role: 'user', content: prompt }]
       });
       const rawText = message.content[0].text;
-      // Robustly extract JSON - handle cases where AI adds text before/after
-      let raw = rawText;
-      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) raw = jsonMatch[0];
-      else raw = rawText.replace(/^```json\s*/,'').replace(/\s*```$/,'').trim();
-      return res.status(200).json(JSON.parse(raw));
+      let parsed;
+      try {
+        // Attempt 1: direct parse
+        parsed = JSON.parse(rawText);
+      } catch(_) {
+        try {
+          // Attempt 2: strip markdown fences
+          const stripped = rawText.replace(/^```json\s*/,'').replace(/```\s*$/,'').trim();
+          parsed = JSON.parse(stripped);
+        } catch(_2) {
+          try {
+            // Attempt 3: extract outermost {...} block
+            const m = rawText.match(/\{[\s\S]*\}/);
+            if (!m) throw new Error('No JSON object found in response');
+            parsed = JSON.parse(m[0]);
+          } catch(e3) {
+            // Attempt 4: sanitize control characters then try again
+            const sanitized = rawText
+              .replace(/[\u0000-\u001F\u007F]/g, ' ')
+              .replace(/^[^{]*/,'')
+              .replace(/[^}]*$/,'');
+            parsed = JSON.parse(sanitized);
+          }
+        }
+      }
+      return res.status(200).json(parsed);
     } catch (err) {
       console.error('Global API error:', err?.message || err);
       return res.status(500).json({ error: 'Failed to load global perspective: ' + (err?.message || 'Unknown error') });
