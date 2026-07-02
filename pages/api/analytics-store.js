@@ -1,8 +1,8 @@
+export const config = { maxDuration: 30 };
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end();
   const { event, data, sessionId } = req.body;
-  const timestamp = new Date().toISOString();
-  const entry = { timestamp, event, sessionId: sessionId || 'anonymous', data };
+  const entry = { timestamp: new Date().toISOString(), event, sessionId: sessionId || 'anonymous', data };
   try {
     if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
       const { kv } = await import('@vercel/kv');
@@ -22,8 +22,6 @@ export default async function handler(req, res) {
     } else {
       console.log('[SKYLINE_ANALYTICS]', JSON.stringify(entry));
     }
-  } catch (err) {
-    console.error('Analytics error:', err.message);
-  }
+  } catch (err) { console.error('Analytics error:', err.message); }
   return res.status(200).json({ ok: true });
 }
