@@ -1,3 +1,8 @@
+// Tell Vercel this function needs more than 10 seconds
+export const config = {
+  maxDuration: 60,
+};
+
 import Anthropic from '@anthropic-ai/sdk';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -412,15 +417,7 @@ RULES:
       const message = await client.messages.create({
         model: 'claude-sonnet-4-6',
         max_tokens: 3500,
-        messages: [{
-        role: 'user',
-        content: [{
-          type: 'text',
-          text: prompt,
-          cache_control: { type: 'ephemeral' }
-        }]
-      }],
-      betas: ['prompt-caching-2024-07-31']
+        messages: [{ role: 'user', content: prompt }]
       });
       const raw = message.content[0].text.replace(/^```json\s*/,'').replace(/\s*```$/,'').trim();
       return res.status(200).json(JSON.parse(raw));
@@ -508,11 +505,7 @@ Use ONLY verified data from the knowledge base. If specific data is not in the k
       const message = await client.messages.create({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 2500,
-        messages: [{
-        role: 'user',
-        content: [{ type: 'text', text: prompt, cache_control: { type: 'ephemeral' } }]
-      }],
-      betas: ['prompt-caching-2024-07-31']
+        messages: [{ role: 'user', content: prompt }]
       });
       const raw = message.content[0].text.replace(/^```json\s*/,'').replace(/\s*```$/,'').trim();
       return res.status(200).json(JSON.parse(raw));
@@ -594,11 +587,7 @@ Return ONLY valid JSON:
       const message = await client.messages.create({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 2500,
-        messages: [{
-        role: 'user',
-        content: [{ type: 'text', text: prompt, cache_control: { type: 'ephemeral' } }]
-      }],
-      betas: ['prompt-caching-2024-07-31']
+        messages: [{ role: 'user', content: prompt }]
       });
       const raw = message.content[0].text.replace(/^```json\s*/,'').replace(/\s*```$/,'').trim();
       return res.status(200).json(JSON.parse(raw));
