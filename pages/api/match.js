@@ -1,7 +1,4 @@
-// Tell Vercel this function needs more than 10 seconds
-export const config = {
-  maxDuration: 60,
-};
+export const config = { maxDuration: 60 };
 
 import Anthropic from '@anthropic-ai/sdk';
 
@@ -415,15 +412,20 @@ RULES:
 
     try {
       const message = await client.messages.create({
-        model: 'claude-sonnet-4-6',
+        model: 'claude-sonnet-4-6-20260218',
         max_tokens: 3500,
         messages: [{ role: 'user', content: prompt }]
       });
-      const raw = message.content[0].text.replace(/^```json\s*/,'').replace(/\s*```$/,'').trim();
+      const rawText = message.content[0].text;
+      // Robustly extract JSON - handle cases where AI adds text before/after
+      let raw = rawText;
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) raw = jsonMatch[0];
+      else raw = rawText.replace(/^```json\s*/,'').replace(/\s*```$/,'').trim();
       return res.status(200).json(JSON.parse(raw));
     } catch (err) {
-      console.error('Match API error:', err);
-      return res.status(500).json({ error: 'Failed to generate results. Please try again.' });
+      console.error('Match API error:', err?.message || err);
+      return res.status(500).json({ error: 'Failed to generate results: ' + (err?.message || 'Unknown error') });
     }
   }
 
@@ -507,11 +509,16 @@ Use ONLY verified data from the knowledge base. If specific data is not in the k
         max_tokens: 2500,
         messages: [{ role: 'user', content: prompt }]
       });
-      const raw = message.content[0].text.replace(/^```json\s*/,'').replace(/\s*```$/,'').trim();
+      const rawText = message.content[0].text;
+      // Robustly extract JSON - handle cases where AI adds text before/after
+      let raw = rawText;
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) raw = jsonMatch[0];
+      else raw = rawText.replace(/^```json\s*/,'').replace(/\s*```$/,'').trim();
       return res.status(200).json(JSON.parse(raw));
     } catch (err) {
-      console.error('Concours API error:', err);
-      return res.status(500).json({ error: 'Failed to load concours guide. Please try again.' });
+      console.error('Concours API error:', err?.message || err);
+      return res.status(500).json({ error: 'Failed to load concours guide: ' + (err?.message || 'Unknown error') });
     }
   }
 
@@ -589,11 +596,16 @@ Return ONLY valid JSON:
         max_tokens: 2500,
         messages: [{ role: 'user', content: prompt }]
       });
-      const raw = message.content[0].text.replace(/^```json\s*/,'').replace(/\s*```$/,'').trim();
+      const rawText = message.content[0].text;
+      // Robustly extract JSON - handle cases where AI adds text before/after
+      let raw = rawText;
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) raw = jsonMatch[0];
+      else raw = rawText.replace(/^```json\s*/,'').replace(/\s*```$/,'').trim();
       return res.status(200).json(JSON.parse(raw));
     } catch (err) {
-      console.error('Global API error:', err);
-      return res.status(500).json({ error: 'Failed to load global perspective. Please try again.' });
+      console.error('Global API error:', err?.message || err);
+      return res.status(500).json({ error: 'Failed to load global perspective: ' + (err?.message || 'Unknown error') });
     }
   }
 
