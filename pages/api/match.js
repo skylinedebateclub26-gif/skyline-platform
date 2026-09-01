@@ -5,50 +5,6 @@ import Anthropic from '@anthropic-ai/sdk';
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SAFE JSON PARSER — 5 fallback strategies
-// ─────────────────────────────────────────────────────────────────────────────
-function safeParseJSON(text) {
-  if (!text) throw new Error('Empty response from AI');
-
-  // 1. Direct
-  try { return JSON.parse(text); } catch (_) {}
-
-  // 2. Strip markdown fences
-  try {
-    const s = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-    return JSON.parse(s);
-  } catch (_) {}
-
-  // 3. Extract outermost { }
-  try {
-    const start = text.indexOf('{');
-    const end = text.lastIndexOf('}');
-    if (start !== -1 && end > start) return JSON.parse(text.slice(start, end + 1));
-  } catch (_) {}
-
-  // 4. Remove control characters then try
-  try {
-    let clean = '';
-    for (let i = 0; i < text.length; i++) {
-      const c = text.charCodeAt(i);
-      if (c === 9 || c === 10 || c === 13 || c >= 32) clean += text[i];
-    }
-    const start = clean.indexOf('{');
-    const end = clean.lastIndexOf('}');
-    if (start !== -1 && end > start) return JSON.parse(clean.slice(start, end + 1));
-  } catch (_) {}
-
-  // 5. Fix trailing commas
-  try {
-    let s = text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1);
-    s = s.replace(/,(\s*[}\]])/g, '$1');
-    return JSON.parse(s);
-  } catch (e) {
-    throw new Error('JSON parse failed after 5 attempts. Error: ' + e.message);
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // LIVE KNOWLEDGE UPDATES
 // ─────────────────────────────────────────────────────────────────────────────
 async function getLiveKnowledgeUpdates() {
@@ -64,6 +20,269 @@ async function getLiveKnowledgeUpdates() {
       '\n=== END UPDATES ===';
   } catch { return ''; }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STRUCTURED CALL HELPER
+// The schema is enforced by the API through grammar-constrained sampling.
+// The model cannot emit JSON that violates it. No fallback parser needed.
+// ─────────────────────────────────────────────────────────────────────────────
+async function callStructured({ model, maxTokens, prompt, schema, label }) {
+  const msg = await client.messages.create({
+    model,
+    max_tokens: maxTokens,
+    messages: [{ role: 'user', content: prompt }],
+    output_config: {
+      format: { type: 'json_schema', schema }
+    }
+  });
+
+  console.log(
+    `[${label}] stop_reason=${msg.stop_reason} ` +
+    `in=${msg.usage?.input_tokens} out=${msg.usage?.output_tokens}`
+  );
+
+  if (msg.stop_reason === 'max_tokens') {
+    throw new Error(
+      `Response was cut off at ${maxTokens} output tokens. Raise max_tokens for ${label}.`
+    );
+  }
+  if (msg.stop_reason === 'refusal') {
+    throw new Error(`The model declined this ${label} request.`);
+  }
+
+  const block = msg.content.find(b => b.type === 'text');
+  if (!block || !block.text) {
+    throw new Error(
+      `No text block returned for ${label}. Got: ${msg.content.map(b => b.type).join(', ') || 'nothing'}`
+    );
+  }
+
+  try {
+    return JSON.parse(block.text);
+  } catch (e) {
+    // Should be unreachable. If it ever fires, the raw text is in the Vercel log.
+    console.error(`[${label}] RAW AI RESPONSE >>>`, block.text);
+    throw new Error(`Parse failed despite structured outputs: ${e.message}`);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SCHEMAS
+// Every property is required and every object sets additionalProperties: false.
+// Both are deliberate: optional properties count against the API's complexity
+// budget, and additionalProperties: false is mandatory for structured outputs.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const MATCH_SCHEMA = {
+  type: 'object',
+  properties: {
+    headline: { type: 'string', description: '8 to 10 word headline personalised to this student' },
+    summary: { type: 'string', description: 'Two sentences about their profile and honest challenges' },
+    riasec_primary: { type: 'string', enum: ['R', 'I', 'A', 'S', 'E', 'C'] },
+    riasec_secondary: { type: 'string', enum: ['R', 'I', 'A', 'S', 'E', 'C'] },
+    profile_tags: { type: 'array', items: { type: 'string' } },
+    careers: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          title: { type: 'string' },
+          field: { type: 'string' },
+          score: { type: 'integer', description: '30 to 92. Top match between 82 and 92.' },
+          score_breakdown: {
+            type: 'object',
+            properties: {
+              personality_fit: { type: 'integer' },
+              values_alignment: { type: 'integer' },
+              academic_match: { type: 'integer' }
+            },
+            required: ['personality_fit', 'values_alignment', 'academic_match'],
+            additionalProperties: false
+          },
+          why: { type: 'string', description: 'Three sentences referencing the student actual answers' },
+          entry_path: { type: 'string' },
+          duration: { type: 'string' },
+          concours: { type: 'array', items: { type: 'string' } },
+          concours_detail: {
+            type: 'object',
+            properties: {
+              exam_format: { type: 'string' },
+              key_subjects: { type: 'array', items: { type: 'string' } },
+              places: { type: 'string' },
+              centres: { type: 'string' },
+              fee: { type: 'string' },
+              deadline: { type: 'string' },
+              age_limit: { type: 'string' },
+              eligibility_note: { type: 'string' }
+            },
+            required: ['exam_format', 'key_subjects', 'places', 'centres', 'fee', 'deadline', 'age_limit', 'eligibility_note'],
+            additionalProperties: false
+          },
+          global_perspective: { type: 'string' },
+          civil_service: { type: 'boolean' }
+        },
+        required: ['title', 'field', 'score', 'score_breakdown', 'why', 'entry_path', 'duration', 'concours', 'concours_detail', 'global_perspective', 'civil_service'],
+        additionalProperties: false
+      }
+    }
+  },
+  required: ['headline', 'summary', 'riasec_primary', 'riasec_secondary', 'profile_tags', 'careers'],
+  additionalProperties: false
+};
+
+const CONCOURS_SCHEMA = {
+  type: 'object',
+  properties: {
+    name: { type: 'string' },
+    short_name: { type: 'string' },
+    institution: { type: 'string' },
+    location: { type: 'string' },
+    field: { type: 'string' },
+    overview: { type: 'string' },
+    exam_format: {
+      type: 'object',
+      properties: {
+        papers: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              subject: { type: 'string' },
+              duration: { type: 'string' },
+              coefficient: { type: 'number' },
+              questions: { type: 'string' },
+              note: { type: 'string' }
+            },
+            required: ['subject', 'duration', 'coefficient', 'questions', 'note'],
+            additionalProperties: false
+          }
+        },
+        total_duration: { type: 'string' },
+        structure_note: { type: 'string' }
+      },
+      required: ['papers', 'total_duration', 'structure_note'],
+      additionalProperties: false
+    },
+    places: { type: 'string' },
+    centres: { type: 'array', items: { type: 'string' } },
+    eligibility: {
+      type: 'object',
+      properties: {
+        diplomas: { type: 'array', items: { type: 'string' } },
+        subjects_required: { type: 'array', items: { type: 'string' } },
+        age_limit: { type: 'string' },
+        other: { type: 'string' }
+      },
+      required: ['diplomas', 'subjects_required', 'age_limit', 'other'],
+      additionalProperties: false
+    },
+    registration: {
+      type: 'object',
+      properties: {
+        method: { type: 'string' },
+        website: { type: 'string' },
+        fee: { type: 'string' },
+        deadline: { type: 'string' },
+        documents: { type: 'array', items: { type: 'string' } }
+      },
+      required: ['method', 'website', 'fee', 'deadline', 'documents'],
+      additionalProperties: false
+    },
+    difficulty: {
+      type: 'object',
+      properties: {
+        level: { type: 'string' },
+        acceptance_rate_estimate: { type: 'string' },
+        hardest_paper: { type: 'string' },
+        honest_assessment: { type: 'string' }
+      },
+      required: ['level', 'acceptance_rate_estimate', 'hardest_paper', 'honest_assessment'],
+      additionalProperties: false
+    },
+    preparation: {
+      type: 'object',
+      properties: {
+        timeline: { type: 'string' },
+        key_topics: { type: 'array', items: { type: 'string' } },
+        common_mistakes: { type: 'array', items: { type: 'string' } },
+        study_strategy: { type: 'string' },
+        past_questions: { type: 'string' }
+      },
+      required: ['timeline', 'key_topics', 'common_mistakes', 'study_strategy', 'past_questions'],
+      additionalProperties: false
+    },
+    career_outcomes: {
+      type: 'object',
+      properties: {
+        degree_awarded: { type: 'string' },
+        duration: { type: 'string' },
+        career_paths: { type: 'array', items: { type: 'string' } },
+        civil_service: { type: 'boolean' },
+        salary_range_cameroon: { type: 'string' }
+      },
+      required: ['degree_awarded', 'duration', 'career_paths', 'civil_service', 'salary_range_cameroon'],
+      additionalProperties: false
+    },
+    global_perspective: {
+      type: 'object',
+      properties: {
+        comparable_to: { type: 'string' },
+        international_recognition: { type: 'string' },
+        study_abroad_pathway: { type: 'string' },
+        work_abroad_pathway: { type: 'string' },
+        cameroon_vs_abroad: { type: 'string' }
+      },
+      required: ['comparable_to', 'international_recognition', 'study_abroad_pathway', 'work_abroad_pathway', 'cameroon_vs_abroad'],
+      additionalProperties: false
+    },
+    insider_tips: { type: 'array', items: { type: 'string' } }
+  },
+  required: ['name', 'short_name', 'institution', 'location', 'field', 'overview', 'exam_format', 'places', 'centres', 'eligibility', 'registration', 'difficulty', 'preparation', 'career_outcomes', 'global_perspective', 'insider_tips'],
+  additionalProperties: false
+};
+
+const GLOBAL_SCHEMA = {
+  type: 'object',
+  properties: {
+    field: { type: 'string' },
+    cameroon_overview: { type: 'string' },
+    cameroon_strengths: { type: 'array', items: { type: 'string' } },
+    cameroon_challenges: { type: 'array', items: { type: 'string' } },
+    comparison: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          country: { type: 'string' },
+          system: { type: 'string' },
+          similarities: { type: 'string' },
+          differences: { type: 'string' },
+          mutual_recognition: { type: 'string' }
+        },
+        required: ['country', 'system', 'similarities', 'differences', 'mutual_recognition'],
+        additionalProperties: false
+      }
+    },
+    qualification_journey: {
+      type: 'object',
+      properties: {
+        to_study_in_france: { type: 'string' },
+        to_study_in_uk: { type: 'string' },
+        to_study_in_us: { type: 'string' },
+        to_work_in_france: { type: 'string' },
+        to_work_in_uk: { type: 'string' },
+        to_work_in_us: { type: 'string' }
+      },
+      required: ['to_study_in_france', 'to_study_in_uk', 'to_study_in_us', 'to_work_in_france', 'to_work_in_uk', 'to_work_in_us'],
+      additionalProperties: false
+    },
+    reality_check: { type: 'string' },
+    opportunity_hotspots: { type: 'array', items: { type: 'string' } },
+    cameroonian_advantage: { type: 'string' }
+  },
+  required: ['field', 'cameroon_overview', 'cameroon_strengths', 'cameroon_challenges', 'comparison', 'qualification_journey', 'reality_check', 'opportunity_hotspots', 'cameroonian_advantage'],
+  additionalProperties: false
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // KNOWLEDGE BASE
@@ -123,6 +342,8 @@ Engineering degrees: Cameroon is not a Washington Accord signatory so degrees ar
 Bilingual advantage: Cameroonian graduates (French and English) can pursue both Francophone African pathways (France, Belgium, CEMAC) and Anglophone pathways (UK, Nigeria, Ghana). This is a genuine and rare advantage.
 `;
 
+const SKYLAR = `You are Skylar, the AI mentor of Skyline Academy. You are warm, gentle and soft-spoken on the surface, but deeply perceptive underneath. You are the brilliant, intuitive older sister who went through this system herself and understands exactly what it costs a Cameroonian student to navigate it. You never sound clinical or generic. You speak truth kindly. Write naturally, in full warm sentences, the way you would speak to a student who is nervous about their future.`;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // HANDLER
 // ─────────────────────────────────────────────────────────────────────────────
@@ -130,66 +351,45 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   const { type, profile, concours, field } = req.body;
+
+  // Analytics needs no AI call and no knowledge lookup.
+  if (type === 'analytics') {
+    console.log('[ANALYTICS]', JSON.stringify({
+      timestamp: new Date().toISOString(),
+      event: req.body.event,
+      data: req.body.data
+    }));
+    return res.status(200).json({ ok: true });
+  }
+
   const liveUpdates = await getLiveKnowledgeUpdates();
 
   // ── CAREER MATCH ──────────────────────────────────────────────────────────
   if (type === 'match' || !type) {
     if (!profile) return res.status(400).json({ error: 'No profile provided' });
 
-    const prompt = `You are Skylar, Skyline Academy AI mentor. You are warm, deeply perceptive, and speak like the brilliant older sister who genuinely understands what it costs to navigate the Cameroonian educational system. You combine Holland RIASEC psychology expertise with encyclopaedic knowledge of Cameroon entrance examinations.
+    const prompt = `${SKYLAR}
+
+You combine Holland RIASEC psychology expertise with encyclopaedic knowledge of Cameroonian entrance examinations.
 
 ${KB}${liveUpdates}
 
-Student profile from 25-question assessment:
+Student profile from the 25-question assessment:
 ${JSON.stringify(profile, null, 2)}
 
-ANSWER CODES: RIASEC R=Realistic I=Investigative A=Artistic S=Social E=Enterprising C=Conventional. q8/q12/q20 are Likert 1-5. q25 is open dream text.
+ANSWER CODES: RIASEC R=Realistic I=Investigative A=Artistic S=Social E=Enterprising C=Conventional. q8, q12 and q20 are Likert 1-5. q25 is open dream text.
 
-Return ONLY a JSON object. Start your response with { and end with }. No other text. No markdown. No explanation before or after.
-
-Use only ASCII characters in all string values. Write "it is" not contractions. Write "Cameroon" not possessives. Keep each string value on one line only.
-
-{
-  "headline": "8-10 word headline personalised to this student",
-  "summary": "Two sentences about their unique profile and honest challenges",
-  "riasec_primary": "one letter R or I or A or S or E or C",
-  "riasec_secondary": "one letter R or I or A or S or E or C",
-  "profile_tags": ["tag1","tag2","tag3"],
-  "careers": [
-    {
-      "title": "specific career title",
-      "field": "Health Sciences",
-      "score": 88,
-      "score_breakdown": {"personality_fit": 90, "values_alignment": 85, "academic_match": 88},
-      "why": "Three sentences referencing the student actual answers",
-      "entry_path": "exact concours name",
-      "duration": "e.g. 7 years at FMSB Yaounde",
-      "concours": ["Concours name"],
-      "concours_detail": {
-        "exam_format": "e.g. 100 MCQs: Biology 50, Chemistry 25, Physics 25",
-        "key_subjects": ["Biology","Chemistry"],
-        "places": "60 places",
-        "centres": "Buea, Yaounde, Douala",
-        "fee": "20000 FCFA",
-        "deadline": "July to August",
-        "age_limit": "Maximum 23 years",
-        "eligibility_note": "GCE A/L Biology and Chemistry mandatory"
-      },
-      "global_perspective": "Two sentences on international recognition and doors opened abroad",
-      "civil_service": true
-    }
-  ]
-}
-
-Return exactly 7 careers across at least 4 different fields. Scores range from 30 to 92. Top match 82-92. Use only verified data from the knowledge base above.`;
+Produce exactly 7 career matches spanning at least 4 different fields. Scores range from 30 to 92, with the top match between 82 and 92. Every factual detail about exams, fees, places, centres, age limits and eligibility must come from the knowledge base above. Never invent a figure. In each "why", reference the student's actual answers specifically rather than speaking in generalities.`;
 
     try {
-      const msg = await client.messages.create({
+      const data = await callStructured({
         model: 'claude-sonnet-4-6',
-        max_tokens: 4000,
-        messages: [{ role: 'user', content: prompt }]
+        maxTokens: 8000,
+        prompt,
+        schema: MATCH_SCHEMA,
+        label: 'MATCH'
       });
-      return res.status(200).json(safeParseJSON(msg.content[0].text));
+      return res.status(200).json(data);
     } catch (err) {
       console.error('MATCH ERROR:', err.message);
       return res.status(500).json({ error: 'Match failed: ' + err.message });
@@ -200,82 +400,25 @@ Return exactly 7 careers across at least 4 different fields. Scores range from 3
   if (type === 'concours') {
     if (!concours) return res.status(400).json({ error: 'No concours specified' });
 
-    const prompt = `You are Skylar, Skyline Academy AI mentor. Warm, precise, honest. You know every competitive entrance examination in Cameroon in detail.
+    const prompt = `${SKYLAR}
+
+You know every competitive entrance examination in Cameroon in detail.
 
 ${KB}${liveUpdates}
 
-Student wants a complete guide to: ${concours}
+A student wants a complete guide to: ${concours}
 
-Return ONLY a JSON object. Start with { and end with }. No other text whatsoever. No markdown fences. No explanation.
-
-Use only ASCII characters in string values. No apostrophes or contractions. Keep each string on one line only.
-
-{
-  "name": "full official name",
-  "short_name": "abbreviation",
-  "institution": "institution name",
-  "location": "city",
-  "field": "field of study",
-  "overview": "Two to three sentences about this programme and why it matters",
-  "exam_format": {
-    "papers": [
-      {"subject": "Biology", "duration": "3 hours", "coefficient": 4, "questions": "50 MCQs", "note": "highest weight subject"}
-    ],
-    "total_duration": "4.5 hours total",
-    "structure_note": "Important structural detail about this exam"
-  },
-  "places": "number of places available",
-  "centres": ["city1","city2","city3"],
-  "eligibility": {
-    "diplomas": ["GCE A/L","Bac C or D"],
-    "subjects_required": ["Biology","Chemistry"],
-    "age_limit": "Maximum 23 years or none",
-    "other": "Any other key requirement"
-  },
-  "registration": {
-    "method": "Online via ubuea.cm",
-    "website": "ubuea.cm",
-    "fee": "20000 FCFA",
-    "deadline": "July to August",
-    "documents": ["GCE A/L certificate","Birth certificate","National ID","Passport photos","Proof of payment"]
-  },
-  "difficulty": {
-    "level": "Competitive",
-    "acceptance_rate_estimate": "25 to 35 percent",
-    "hardest_paper": "Biology",
-    "honest_assessment": "Two sentences of honest direct advice about competition level"
-  },
-  "preparation": {
-    "timeline": "4 to 6 months",
-    "key_topics": ["topic1","topic2","topic3"],
-    "common_mistakes": ["mistake1","mistake2"],
-    "study_strategy": "Three to four sentences of specific actionable preparation advice",
-    "past_questions": "Available through Skyline Academy and University prep networks"
-  },
-  "career_outcomes": {
-    "degree_awarded": "BSc Nursing",
-    "duration": "3 years",
-    "career_paths": ["path1","path2","path3"],
-    "civil_service": true,
-    "salary_range_cameroon": "80000 to 200000 FCFA per month entry level"
-  },
-  "global_perspective": {
-    "comparable_to": "UK BSc equivalent",
-    "international_recognition": "Honest assessment of recognition abroad",
-    "study_abroad_pathway": "How graduates can pursue further studies abroad",
-    "work_abroad_pathway": "What a graduate needs to do to work in this field abroad",
-    "cameroon_vs_abroad": "Two sentences comparing career in Cameroon vs internationally"
-  },
-  "insider_tips": ["tip1","tip2","tip3"]
-}`;
+Every factual detail must come from the knowledge base above. Never invent a figure. Where the knowledge base does not specify something, say so plainly rather than guessing. Be honest about how competitive this is; do not soften it into meaninglessness, but do not frighten the student either.`;
 
     try {
-      const msg = await client.messages.create({
+      const data = await callStructured({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 2500,
-        messages: [{ role: 'user', content: prompt }]
+        maxTokens: 8000,
+        prompt,
+        schema: CONCOURS_SCHEMA,
+        label: 'CONCOURS'
       });
-      return res.status(200).json(safeParseJSON(msg.content[0].text));
+      return res.status(200).json(data);
     } catch (err) {
       console.error('CONCOURS ERROR:', err.message);
       return res.status(500).json({ error: 'Concours guide failed: ' + err.message });
@@ -286,58 +429,29 @@ Use only ASCII characters in string values. No apostrophes or contractions. Keep
   if (type === 'global') {
     if (!field) return res.status(400).json({ error: 'No field specified' });
 
-    const prompt = `You are Skylar, Skyline Academy AI mentor. You speak with excitement and honesty about global career pathways for Cameroonian students.
+    const prompt = `${SKYLAR}
+
+You speak with excitement and honesty about global career pathways for Cameroonian students.
 
 ${KB}${liveUpdates}
 
-Student wants to understand the global landscape for this field: ${field}
+A student wants to understand the global landscape for this field: ${field}
 
-Return ONLY a JSON object. Start with { and end with }. No other text. No markdown. No explanation before or after.
-
-Use only ASCII characters in string values. No apostrophes or contractions. Keep each string on one line only.
-
-{
-  "field": "${field}",
-  "cameroon_overview": "Two to three sentences about this field in Cameroon",
-  "cameroon_strengths": ["strength1","strength2","strength3"],
-  "cameroon_challenges": ["challenge1","challenge2"],
-  "comparison": [
-    {"country": "Nigeria", "system": "Their training system", "similarities": "How similar to Cameroon", "differences": "Key differences", "mutual_recognition": "Can Cameroonian work there"},
-    {"country": "Ghana", "system": "Their training system", "similarities": "How similar to Cameroon", "differences": "Key differences", "mutual_recognition": "Can Cameroonian work there"},
-    {"country": "France", "system": "Their training system", "similarities": "How similar to Cameroon", "differences": "Key differences", "mutual_recognition": "Can Cameroonian work there"},
-    {"country": "United Kingdom", "system": "Their training system", "similarities": "How similar to Cameroon", "differences": "Key differences", "mutual_recognition": "Can Cameroonian work there"},
-    {"country": "United States", "system": "Their training system", "similarities": "How similar to Cameroon", "differences": "Key differences", "mutual_recognition": "Can Cameroonian work there"}
-  ],
-  "qualification_journey": {
-    "to_study_in_france": "Steps to study in France after Cameroon degree",
-    "to_study_in_uk": "Steps to study in UK after Cameroon degree",
-    "to_study_in_us": "Steps to study in US after Cameroon degree",
-    "to_work_in_france": "Steps to work professionally in France",
-    "to_work_in_uk": "Steps to work professionally in UK",
-    "to_work_in_us": "Steps to work professionally in US"
-  },
-  "reality_check": "Three to four sentences of honest direct advice about real opportunities and challenges",
-  "opportunity_hotspots": ["country or region 1","country or region 2","country or region 3"],
-  "cameroonian_advantage": "One to two sentences about the unique bilingual advantage"
-}`;
+Compare Cameroon with Nigeria, Ghana, France, the United Kingdom and the United States, in that order. Be honest in the reality check: name the real barriers, not just the opportunities. Every factual claim about recognition and equivalence must come from the knowledge base above.`;
 
     try {
-      const msg = await client.messages.create({
+      const data = await callStructured({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 2500,
-        messages: [{ role: 'user', content: prompt }]
+        maxTokens: 8000,
+        prompt,
+        schema: GLOBAL_SCHEMA,
+        label: 'GLOBAL'
       });
-      return res.status(200).json(safeParseJSON(msg.content[0].text));
+      return res.status(200).json(data);
     } catch (err) {
       console.error('GLOBAL ERROR:', err.message);
       return res.status(500).json({ error: 'Global perspective failed: ' + err.message });
     }
-  }
-
-  // ── ANALYTICS ─────────────────────────────────────────────────────────────
-  if (type === 'analytics') {
-    console.log('[ANALYTICS]', JSON.stringify({ timestamp: new Date().toISOString(), event: req.body.event, data: req.body.data }));
-    return res.status(200).json({ ok: true });
   }
 
   return res.status(400).json({ error: 'Invalid request type' });
