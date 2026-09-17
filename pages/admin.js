@@ -1,11 +1,13 @@
 import Head from 'next/head';
 import { useState, useEffect } from 'react';
-
-const ADMIN_PW = process.env.NEXT_PUBLIC_ADMIN_PASSWORD || 'skyline2026';
+import { CONCOURS_LIST, FIELDS } from '../lib/concours';
 
 export default function AdminDashboard() {
   const [authed, setAuthed] = useState(false);
+  const [checking, setChecking] = useState(true);
   const [pw, setPw] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [loggingIn, setLoggingIn] = useState(false);
   const [tab, setTab] = useState('stats'); // stats | knowledge | activity
   const [stats, setStats] = useState(null);
   const [events, setEvents] = useState([]);
@@ -14,6 +16,7 @@ export default function AdminDashboard() {
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState('');
   const [newUpdate, setNewUpdate] = useState({ category: 'Concours Update', title: '', content: '' });
+  const [warm, setWarm] = useState(null); // progress of "Prepare all guides"
 
   const CATEGORIES = [
     'Concours Update', 'Fee Change', 'New Institution',
@@ -21,12 +24,40 @@ export default function AdminDashboard() {
     'Registration Info', 'General Knowledge', 'Correction'
   ];
 
-  function login() {
-    if (pw === ADMIN_PW || pw === (process.env.NEXT_PUBLIC_ADMIN_PASSWORD || 'skyline2026')) {
-      setAuthed(true);
-    } else {
-      alert('Incorrect password');
+  useEffect(() => {
+    fetch('/api/admin-session')
+      .then(r => r.json())
+      .then(d => setAuthed(Boolean(d.authed)))
+      .catch(() => {})
+      .finally(() => setChecking(false));
+  }, []);
+
+  async function login() {
+    if (!pw || loggingIn) return;
+    setLoggingIn(true);
+    setLoginError('');
+    try {
+      const res = await fetch('/api/admin-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pw })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        setPw('');
+        setAuthed(true);
+      } else {
+        setLoginError(data.error || 'Login failed. Please try again.');
+      }
+    } catch {
+      setLoginError('Network error. Please try again.');
     }
+    setLoggingIn(false);
+  }
+
+  async function logout() {
+    await fetch('/api/admin-session', { method: 'DELETE' }).catch(() => {});
+    setAuthed(false);
   }
 
   useEffect(() => {
@@ -38,11 +69,12 @@ export default function AdminDashboard() {
   async function loadStats() {
     setStatsLoading(true);
     try {
-      const res = await fetch(`/api/admin-stats?token=${ADMIN_PW}`);
+      const res = await fetch('/api/admin-stats');
+      if (res.status === 401) { setAuthed(false); setStatsLoading(false); return; }
       const data = await res.json();
-      setStats(data.stats);
+      setStats(data.stats || { error: data.error || 'Could not load statistics.' });
       setEvents(data.recent_events || []);
-    } catch { setStats({ error: 'Could not load. Check Vercel KV setup.' }); }
+    } catch { setStats({ error: 'Could not load statistics. Check the storage connection.' }); }
     setStatsLoading(false);
   }
 
@@ -51,8 +83,9 @@ export default function AdminDashboard() {
       const res = await fetch('/api/knowledge-update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: ADMIN_PW, action: 'list' })
+        body: JSON.stringify({ action: 'list' })
       });
+      if (res.status === 401) { setAuthed(false); return; }
       const data = await res.json();
       setUpdates(data.updates || []);
     } catch {}
@@ -67,15 +100,16 @@ export default function AdminDashboard() {
       const res = await fetch('/api/knowledge-update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: ADMIN_PW, action: 'add', update: newUpdate })
+        body: JSON.stringify({ action: 'add', update: newUpdate })
       });
-      const data = await res.json();
-      if (data.ok) {
+      if (res.status === 401) { setAuthed(false); setSaving(false); return; }
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
         setSaveMsg('✓ Skylar has been updated. She will use this in all future responses immediately.');
         setNewUpdate({ category: 'Concours Update', title: '', content: '' });
         loadUpdates();
       } else {
-        setSaveMsg('Error: ' + (data.warning || data.error || 'Unknown error'));
+        setSaveMsg('Not saved: ' + (data.error || 'Unknown error'));
       }
     } catch (e) { setSaveMsg('Network error. Try again.'); }
     setSaving(false);
@@ -83,17 +117,66 @@ export default function AdminDashboard() {
 
   async function deleteUpdate(id) {
     if (!confirm('Remove this update from Skylar\'s knowledge?')) return;
-    await fetch('/api/knowledge-update', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: ADMIN_PW, action: 'delete', update: { id } })
-    });
+    try {
+      const res = await fetch('/api/knowledge-update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'delete', update: { id } })
+      });
+      if (res.status === 401) { setAuthed(false); return; }
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || 'Could not remove this update.');
+      }
+    } catch { alert('Network error. Please try again.'); }
     loadUpdates();
   }
 
+  // Writes every exam guide and global perspective in advance (three at a time),
+  // so students are served instantly and the president can review them first.
+  async function prepareGuides() {
+    if (warm?.running) return;
+    const jobs = [
+      ...CONCOURS_LIST.map(c => ({ label: c.id, body: { type: 'concours', concoursId: c.id } })),
+      ...FIELDS.map(f => ({ label: `Global: ${f}`, body: { type: 'global', field: f } })),
+    ];
+    const total = jobs.length;
+    const failed = [];
+    let generated = 0;
+    let done = 0;
+    setWarm({ running: true, done, total, generated, failed: [] });
+    const worker = async () => {
+      while (jobs.length) {
+        const job = jobs.shift();
+        try {
+          const res = await fetch('/api/match', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(job.body)
+          });
+          if (!res.ok) failed.push(job.label);
+          else if (res.headers.get('X-Skyline-Cache') === 'miss') generated += 1;
+        } catch {
+          failed.push(job.label);
+        }
+        done += 1;
+        setWarm({ running: true, done, total, generated, failed: [...failed] });
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]);
+    setWarm({ running: false, done, total, generated, failed: [...failed] });
+  }
+
+  if (checking) return (
+    <div style={{minHeight:'100vh',background:'#F8F6F1',display:'flex',alignItems:'center',justifyContent:'center',fontFamily:'system-ui,sans-serif',color:'#7A776F'}}>
+      <Head><title>Admin | Skyline Academy</title></Head>
+      Checking your session…
+    </div>
+  );
+
   if (!authed) return (
     <div style={{minHeight:'100vh',background:'#F8F6F1',display:'flex',alignItems:'center',justifyContent:'center',fontFamily:'system-ui,sans-serif'}}>
-      <Head><title>Admin — Skyline Academy</title></Head>
+      <Head><title>Admin | Skyline Academy</title></Head>
       <div style={{background:'white',borderRadius:16,padding:40,width:340,boxShadow:'0 4px 32px rgba(14,124,138,.12)',textAlign:'center'}}>
         <div style={{width:56,height:56,background:'linear-gradient(135deg,#0E7C8A,#14A3B3)',borderRadius:14,display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto 16px',fontSize:24}}>🔒</div>
         <h2 style={{color:'#0E7C8A',marginBottom:4,fontSize:20}}>Skyline Admin</h2>
@@ -102,18 +185,19 @@ export default function AdminDashboard() {
           onChange={e=>setPw(e.target.value)}
           onKeyDown={e=>e.key==='Enter'&&login()}
           style={{width:'100%',padding:'11px 14px',borderRadius:8,border:'1.5px solid #E8E6E1',fontSize:14,marginBottom:12,fontFamily:'inherit',outline:'none'}} />
-        <button onClick={login}
-          style={{width:'100%',background:'#0E7C8A',color:'white',border:'none',padding:12,borderRadius:8,fontSize:15,fontWeight:700,cursor:'pointer',fontFamily:'inherit'}}>
-          Enter Dashboard →
+        <button onClick={login} disabled={loggingIn}
+          style={{width:'100%',background:loggingIn?'#C2BFB8':'#0E7C8A',color:'white',border:'none',padding:12,borderRadius:8,fontSize:15,fontWeight:700,cursor:loggingIn?'wait':'pointer',fontFamily:'inherit'}}>
+          {loggingIn ? 'Checking…' : 'Enter Dashboard →'}
         </button>
+        {loginError && <div style={{marginTop:12,fontSize:13,color:'#C0392B'}}>{loginError}</div>}
       </div>
     </div>
   );
 
   return (
     <>
-      <Head><title>Admin — Skyline Academy</title></Head>
-      <style>{`
+      <Head><title>Admin | Skyline Academy</title></Head>
+      <style dangerouslySetInnerHTML={{__html:`
         * { box-sizing:border-box; margin:0; padding:0; }
         body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif; background:#F8F6F1; }
         .header { background:#0E7C8A; padding:14px 28px; display:flex; align-items:center; gap:16px; }
@@ -165,7 +249,7 @@ export default function AdminDashboard() {
         .skylar-dot { width:34px; height:34px; background:linear-gradient(135deg,#0E7C8A,#14A3B3); border-radius:50%; display:flex; align-items:center; justify-content:center; color:white; font-size:13px; font-weight:700; flex-shrink:0; }
         .no-kv-banner { background:#FFF8E7; border:1.5px solid rgba(247,148,30,.3); border-radius:10px; padding:16px; margin-bottom:20px; font-size:14px; color:#9a5a00; line-height:1.6; }
         @media (max-width:768px) { .stat-grid { grid-template-columns:1fr 1fr; } .grid2 { grid-template-columns:1fr; } }
-      `}</style>
+      `}} />
 
       <div className="header">
         <div>
@@ -173,6 +257,7 @@ export default function AdminDashboard() {
           <div className="header-sub">Logged in as Brandon · Skyline President</div>
         </div>
         <button onClick={loadStats} className="refresh-btn">↻ Refresh</button>
+        <button onClick={logout} className="refresh-btn" style={{marginLeft:8,background:'rgba(255,255,255,.15)'}}>Log out</button>
       </div>
 
       <div className="tab-bar">
@@ -189,7 +274,7 @@ export default function AdminDashboard() {
 
           {!statsLoading && stats?.error && (
             <div className="no-kv-banner">
-              <strong>⚠️ Vercel KV not yet configured.</strong> Analytics will start recording once you add a KV database to your Vercel project (Storage → Create KV Database → Connect to project). Until then, all events are visible in Vercel Function Logs.
+              <strong>⚠️ Storage is not connected yet.</strong> Analytics and Skylar updates start saving once an Upstash Redis store is connected to this Vercel project (see the Live Activity tab for the steps). Until then, events only appear in the Vercel function logs.
             </div>
           )}
 
@@ -199,7 +284,7 @@ export default function AdminDashboard() {
                 ['Total Sessions','👤',stats.total_sessions||0,'#0E7C8A'],
                 ['Assessments Done','✅',stats.total_assessments||0,'#1A7F5A'],
                 ['Concours Views','📋',stats.total_concours_views||0,'#F7941E'],
-                ['Active This Week','🔥',stats.active_this_week||0,'#C0392B'],
+                ['Active (last 7 days)','🔥',stats.active_this_week||0,'#C0392B'],
               ].map(([label,icon,num,color])=>(
                 <div key={label} className="stat-card">
                   <div style={{fontSize:24,marginBottom:8}}>{icon}</div>
@@ -320,6 +405,23 @@ export default function AdminDashboard() {
             ))}
           </div>
 
+          <div className="card">
+            <div className="card-title">📖 Prepare the Concours guides</div>
+            <p style={{fontSize:14,color:'#4a4740',lineHeight:1.65,marginBottom:14}}>
+              Each guide is written once and then served instantly to every student. When you add or remove an update above, the guides refresh themselves the next time someone opens them. Before an event, press this button to prepare all {CONCOURS_LIST.length} exam guides and {FIELDS.length} global perspectives in advance, then open the Concours page and check each one for accuracy. This can take several minutes, so keep this tab open.
+            </p>
+            <button className="btn-save" onClick={prepareGuides} disabled={Boolean(warm?.running)}>
+              {warm?.running ? `Preparing… ${warm.done} of ${warm.total}` : 'Prepare all guides'}
+            </button>
+            {warm && !warm.running && (
+              <div className={`save-msg ${warm.failed.length ? 'warn' : 'ok'}`}>
+                {warm.failed.length
+                  ? `Finished, but these did not load: ${warm.failed.join(', ')}. Press the button again to retry them.`
+                  : `✓ All ${warm.total} guides are ready (${warm.generated} newly written, ${warm.total - warm.generated} already up to date).`}
+              </div>
+            )}
+          </div>
+
           <div className="card" style={{background:'rgba(14,124,138,.03)',border:'1.5px solid rgba(14,124,138,.12)'}}>
             <div className="card-title">💡 What to add here</div>
             {[
@@ -348,8 +450,8 @@ export default function AdminDashboard() {
             {statsLoading && <div className="empty-state">Loading…</div>}
             {!statsLoading && events.length === 0 && (
               <div className="empty-state">
-                No activity yet — or Vercel KV not configured.<br/>
-                <span style={{fontSize:12,marginTop:8,display:'block'}}>Events are logged to Vercel Function Logs until KV is set up.</span>
+                No activity yet, or storage is not connected.<br/>
+                <span style={{fontSize:12,marginTop:8,display:'block'}}>Until storage is connected, events are only written to the Vercel function logs.</span>
               </div>
             )}
             {events.slice(0,30).map((ev,i)=>(
@@ -362,15 +464,13 @@ export default function AdminDashboard() {
           </div>
 
           <div className="card">
-            <div className="card-title">📌 Setup Vercel KV (for persistent analytics)</div>
+            <div className="card-title">📌 Connect storage (Upstash Redis)</div>
             <ol style={{fontSize:14,color:'#4a4740',lineHeight:2.2,paddingLeft:20}}>
-              <li>Go to your <strong>Vercel dashboard</strong> → click your Skyline project</li>
-              <li>Click <strong>Storage</strong> in the left sidebar</li>
-              <li>Click <strong>Create Database → KV (Redis)</strong></li>
-              <li>Name it <strong>skyline-analytics</strong> → select region <strong>Frankfurt (fra1)</strong></li>
-              <li>Click <strong>Create & Continue → Connect to Project → Connect</strong></li>
-              <li>Vercel adds the credentials automatically — redeploy once</li>
-              <li>All analytics and knowledge updates now persist permanently ✓</li>
+              <li>Open your <strong>Vercel dashboard</strong> and select the Skyline project</li>
+              <li>Open <strong>Storage</strong>. If a Redis store (Upstash) is already listed, make sure it is connected to this project</li>
+              <li>Otherwise choose <strong>Create Database</strong>, pick <strong>Upstash for Redis</strong> from the Marketplace, and pick a region close to your functions</li>
+              <li>Connect it to the project. Vercel adds the connection variables automatically</li>
+              <li>Redeploy once. Analytics and Skylar updates will then be saved ✓</li>
             </ol>
           </div>
         </>)}
