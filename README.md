@@ -25,7 +25,7 @@ Do not create any `NEXT_PUBLIC_` variable for secrets: Next.js sends those to ev
 
 ## Vercel settings
 
-- **Fluid compute must be on** (Settings, Functions). `pages/api/match.js` asks for 300 seconds, which Hobby allows only with Fluid compute. If it is off, set `maxDuration` back to 60.
+- **Fluid compute** is switched on in `vercel.json`, so it does not depend on the dashboard toggle. `pages/api/match.js` asks for 300 seconds, which Hobby allows only with Fluid compute. Do not remove `vercel.json`.
 - Share only the production address with students; preview addresses are protected.
 
 ## Local development
