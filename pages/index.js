@@ -1,14 +1,21 @@
 import Head from 'next/head';
 import Image from 'next/image';
+import { useEffect } from 'react';
+import { track, trackSessionStart } from '../lib/track';
 
 export default function CareerMatch() {
+  useEffect(() => {
+    window.track = track;
+    trackSessionStart();
+  }, []);
+
   return (
     <>
       <Head>
         <title>My Career Match — Skyline Academy</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
       </Head>
-      <style>{`
+      <style dangerouslySetInnerHTML={{__html:`
         :root {
           --navy: #0E7C8A; --navy-mid: #14A3B3; --navy-light: #5CC8D6;
           --amber: #F7941E; --amber-light: #FFC97A;
@@ -160,7 +167,7 @@ export default function CareerMatch() {
           .stream-grid { grid-template-columns:1fr; }
           .concours-detail-grid { grid-template-columns:1fr; }
         }
-      `}</style>
+      `}} />
 
       <header className="site-header">
         <Image src="/skyline-logo.jpeg" alt="Skyline Academy" width={44} height={44} className="logo-img" priority />
@@ -566,6 +573,17 @@ export default function CareerMatch() {
         window._selectedSubjects = [];
         window._selectedStream = null;
 
+        // AI text must never be inserted as raw HTML.
+        const esc = function(v) {
+          return String(v == null ? '' : v).replace(/[&<>"']/g, function(ch) {
+            return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
+          });
+        };
+        const pct = function(v) {
+          const n = Number(v);
+          return Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : 0;
+        };
+
         const STREAMS = {
           sys_gce: [
             {id:'gce_science',label:'Science',badge:'GCE S',subs:'Biology, Chemistry, Physics, Maths, Further Maths',subjects:['Biology','Chemistry','Physics','Mathematics','Further Mathematics','Computer Science','Technical Drawing','Agricultural Science']},
@@ -676,6 +694,10 @@ export default function CareerMatch() {
             document.getElementById('err-6').style.display='block'; return;
           }
           document.getElementById('err-6').style.display='none';
+          if (window._submitting) return;
+          // Restore the loading screen in case an earlier attempt replaced it with an error.
+          const wrap = document.querySelector('#step-7 .loading-wrap');
+          if (window._loadingHTML) wrap.innerHTML = window._loadingHTML; else window._loadingHTML = wrap.innerHTML;
           window.goTo(7);
           window.animateLoadStages();
           window.callAPI();
@@ -693,19 +715,30 @@ export default function CareerMatch() {
         };
 
         window.callAPI = async function() {
+          window._submitting = true;
+          const slowTimer = setTimeout(function() {
+            const sub = document.querySelector('#step-7 .loading-sub');
+            if (sub) sub.textContent = 'Still working. A full report usually takes about a minute, so please keep this page open.';
+          }, 25000);
           try {
             const res = await fetch('/api/match',{
               method:'POST',
               headers:{'Content-Type':'application/json'},
               body: JSON.stringify({type:'match', profile:window._answers})
             });
-            if(!res.ok) throw new Error('Server error '+res.status);
-            const data = await res.json();
-            if(data.error) throw new Error(data.error);
+            let data = null;
+            try { data = await res.json(); } catch (_) { data = null; }
+            if (!res.ok || !data || data.error) {
+              const fallback = res.status === 504 ? 'Skylar took too long to answer. Please try again.' : 'Server error ' + res.status + '. Please try again.';
+              throw new Error((data && data.error) || fallback);
+            }
             window.renderResults(data);
           } catch(e) {
             document.querySelector('#step-7 .loading-wrap').innerHTML =
-              '<div style="background:var(--red-light);border:1px solid #f5c6c4;color:var(--red);padding:20px;border-radius:12px;text-align:center"><strong>Something went wrong.</strong><br/>'+(e.message||'Please try again.')+'<br/><br/><button class="btn btn-secondary" onclick="window.goTo(6)" style="margin:0 auto;display:block">← Go back and retry</button></div>';
+              '<div style="background:var(--red-light);border:1px solid #f5c6c4;color:var(--red);padding:20px;border-radius:12px;text-align:center"><strong>Something went wrong.</strong><br/>'+esc(e.message||'Please try again.')+'<br/><br/><button class="btn btn-secondary" onclick="window.goTo(6)" style="margin:0 auto;display:block">← Go back and retry</button></div>';
+          } finally {
+            clearTimeout(slowTimer);
+            window._submitting = false;
           }
         };
 
@@ -722,7 +755,10 @@ export default function CareerMatch() {
           });
           const container = document.getElementById('career-cards');
           container.innerHTML='';
-          const sorted=(data.careers||[]).sort((a,b)=>b.score-a.score);
+          const sorted=(data.careers||[]).map(c=>Object.assign({},c,{score:pct(c.score)})).sort((a,b)=>b.score-a.score);
+          if (window.track && sorted[0]) {
+            window.track('career_match_completed', {top_career: sorted[0].title, top_field: sorted[0].field, stream: window._selectedStream || ''});
+          }
           sorted.forEach((c,i)=>{
             const isTop=i===0;
             const sc=c.score>=75?'high':c.score>=55?'mid':'';
@@ -748,27 +784,27 @@ export default function CareerMatch() {
               <div class="concours-detail-box">
                 <div class="concours-detail-title">📋 Concours at a glance</div>
                 <div class="concours-detail-grid">
-                  \${cdItems.map(([l,v])=>\`<div class="cd-item"><div class="cd-label">\${l}</div><div class="cd-value">\${v}</div></div>\`).join('')}
+                  \${cdItems.map(([l,v])=>\`<div class="cd-item"><div class="cd-label">\${esc(l)}</div><div class="cd-value">\${esc(v)}</div></div>\`).join('')}
                 </div>
               </div>\` : '';
 
-            const gpHTML = gp ? \`<div class="global-pill">🌍 <strong>Globally:</strong> \${gp}</div>\` : '';
+            const gpHTML = gp ? \`<div class="global-pill">🌍 <strong>Globally:</strong> \${esc(gp)}</div>\` : '';
 
             card.innerHTML=
               (isTop?'<div class="top-badge-pill">★ Best match</div>':'')+
               '<div class="card-top"><div>'+
-              '<div class="career-title">'+c.title+'</div>'+
-              '<div class="career-field">'+c.field+(c.civil_service?' · Fonctionnaire track':'')+' · '+c.duration+'</div>'+
+              '<div class="career-title">'+esc(c.title)+'</div>'+
+              '<div class="career-field">'+esc(c.field)+(c.civil_service?' · Fonctionnaire track':'')+' · '+esc(c.duration)+'</div>'+
               '</div><div class="score-circle '+sc+'"><div class="score-num" id="sn-'+i+'">0</div><div class="score-pct">match</div></div></div>'+
               '<div class="bar-wrap"><div class="bar-label"><span>Overall compatibility</span><span>'+c.score+'%</span></div><div class="bar-track"><div class="bar-fill '+bc+'" id="bf-'+i+'" style="width:0%"></div></div></div>'+
               '<div class="dim-bars">'+
-              '<div class="dim-bar-item"><div class="dim-bar-label">Personality</div><div class="dim-bar-track"><div class="dim-bar-fill" id="dp-'+i+'" data-w="'+(c.score_breakdown?.personality_fit||0)+'%"></div></div></div>'+
-              '<div class="dim-bar-item"><div class="dim-bar-label">Values</div><div class="dim-bar-track"><div class="dim-bar-fill" id="dv-'+i+'" data-w="'+(c.score_breakdown?.values_alignment||0)+'%"></div></div></div>'+
-              '<div class="dim-bar-item"><div class="dim-bar-label">Academic fit</div><div class="dim-bar-track"><div class="dim-bar-fill" id="da-'+i+'" data-w="'+(c.score_breakdown?.academic_match||0)+'%"></div></div></div>'+
+              '<div class="dim-bar-item"><div class="dim-bar-label">Personality</div><div class="dim-bar-track"><div class="dim-bar-fill" id="dp-'+i+'" data-w="'+pct(c.score_breakdown?.personality_fit)+'%"></div></div></div>'+
+              '<div class="dim-bar-item"><div class="dim-bar-label">Values</div><div class="dim-bar-track"><div class="dim-bar-fill" id="dv-'+i+'" data-w="'+pct(c.score_breakdown?.values_alignment)+'%"></div></div></div>'+
+              '<div class="dim-bar-item"><div class="dim-bar-label">Academic fit</div><div class="dim-bar-track"><div class="dim-bar-fill" id="da-'+i+'" data-w="'+pct(c.score_breakdown?.academic_match)+'%"></div></div></div>'+
               '</div>'+
-              '<div class="card-why" style="margin-top:14px">'+c.why+'</div>'+
+              '<div class="card-why" style="margin-top:14px">'+esc(c.why)+'</div>'+
               '<div class="concours-label" style="margin-top:8px">How to enter in Cameroon</div>'+
-              '<div class="concours-chips">'+(c.concours||[]).map(x=>'<span class="concours-chip">'+x+'</span>').join('')+'</div>'+
+              '<div class="concours-chips">'+(c.concours||[]).map(x=>'<span class="concours-chip">'+esc(x)+'</span>').join('')+'</div>'+
               cdHTML+
               gpHTML;
             container.appendChild(card);
