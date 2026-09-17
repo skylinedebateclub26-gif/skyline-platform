@@ -1,27 +1,58 @@
+import { requireAdmin } from '../../lib/adminAuth';
+import { getRedis, parseEntry, toInt } from '../../lib/redis';
+
 export const config = { maxDuration: 30 };
+
+function pairs(flat) {
+  const out = [];
+  for (let i = 0; i < (flat || []).length; i += 2) out.push([String(flat[i]), toInt(flat[i + 1])]);
+  return out;
+}
+
+function lastDays(count) {
+  const now = Date.now();
+  return Array.from({ length: count }, (_, i) => new Date(now - i * 86400000).toISOString().slice(0, 10));
+}
+
 export default async function handler(req, res) {
-  if (req.method !== 'GET') return res.status(405).end();
-  const { token } = req.query;
-  if (token !== (process.env.ADMIN_TOKEN || 'skyline2026')) return res.status(401).json({ error: 'Unauthorized' });
+  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
+  if (!requireAdmin(req, res)) return;
+
+  const redis = getRedis();
+  if (!redis) {
+    return res.status(200).json({ stats: { error: 'Storage is not connected yet.' }, recent_events: [] });
+  }
+
   try {
-    if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) {
-      return res.status(200).json({ stats: { error: 'Vercel KV not configured yet.' }, recent_events: [] });
-    }
-    const { kv } = await import('@vercel/kv');
-    const [ts, ta, tcv, rc, rco, rf, rs, re] = await Promise.all([
-      kv.get('skyline:stats:total_sessions').then(v => parseInt(v)||0),
-      kv.get('skyline:stats:total_assessments').then(v => parseInt(v)||0),
-      kv.get('skyline:stats:total_concours_views').then(v => parseInt(v)||0),
-      kv.zrange('skyline:stats:top_careers', 0, 9, { rev: true, withScores: true }),
-      kv.zrange('skyline:stats:top_concours', 0, 9, { rev: true, withScores: true }),
-      kv.zrange('skyline:stats:top_fields', 0, 9, { rev: true, withScores: true }),
-      kv.zrange('skyline:stats:streams', 0, 9, { rev: true, withScores: true }),
-      kv.lrange('skyline:events', 0, 49)
+    const top = key => redis.zrange(key, 0, 9, { rev: true, withScores: true });
+    const [sessions, assessments, concoursViews, careers, concours, fields, streams, events, activeWeek] = await Promise.all([
+      redis.get('skyline:stats:total_sessions'),
+      redis.get('skyline:stats:total_assessments'),
+      redis.get('skyline:stats:total_concours_views'),
+      top('skyline:stats:top_careers'),
+      top('skyline:stats:top_concours'),
+      top('skyline:stats:top_fields'),
+      top('skyline:stats:streams'),
+      redis.lrange('skyline:events', 0, 49),
+      // Distinct browser sessions seen over the last 7 days (one HyperLogLog per day).
+      redis.pfcount(...lastDays(7).map(day => `skyline:active:${day}`)),
     ]);
-    function parseZ(arr) { const r = []; for (let i = 0; i < (arr||[]).length; i += 2) r.push([arr[i], parseInt(arr[i+1])||0]); return r; }
+
     return res.status(200).json({
-      stats: { total_sessions: ts, total_assessments: ta, total_concours_views: tcv, active_this_week: Math.floor(ts*0.3), top_careers: parseZ(rc), top_concours: parseZ(rco), top_fields: parseZ(rf), streams: parseZ(rs) },
-      recent_events: (re||[]).map(e => { try { return JSON.parse(e); } catch { return null; } }).filter(Boolean)
+      stats: {
+        total_sessions: toInt(sessions),
+        total_assessments: toInt(assessments),
+        total_concours_views: toInt(concoursViews),
+        active_this_week: toInt(activeWeek),
+        top_careers: pairs(careers),
+        top_concours: pairs(concours),
+        top_fields: pairs(fields),
+        streams: pairs(streams),
+      },
+      recent_events: (events || []).map(parseEntry).filter(Boolean),
     });
-  } catch (err) { return res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('ADMIN STATS ERROR:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
 }
