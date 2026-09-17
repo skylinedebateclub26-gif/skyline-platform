@@ -1,33 +1,69 @@
+import crypto from 'crypto';
+import { requireAdmin } from '../../lib/adminAuth';
+import { getRedis, parseEntry } from '../../lib/redis';
+
 export const config = { maxDuration: 30 };
+
+const KEY = 'skyline:knowledge_updates';
+const MAX_UPDATES = 200;
+const CATEGORIES = [
+  'Concours Update', 'Fee Change', 'New Institution',
+  'Eligibility Change', 'Exam Date', 'Places Available',
+  'Registration Info', 'General Knowledge', 'Correction',
+];
+
+// Updates are injected into Skylar's prompt one per line, so collapse whitespace.
+const clean = (value, max) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+
 export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).end();
-  const { token, action, update } = req.body;
-  if (token !== (process.env.ADMIN_TOKEN || 'skyline2026')) return res.status(401).json({ error: 'Unauthorized' });
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  if (!requireAdmin(req, res)) return;
+
+  const redis = getRedis();
+  if (!redis) {
+    return res.status(503).json({
+      error: 'Storage is not connected, so nothing was saved. Connect the Upstash Redis store to this Vercel project, then redeploy.',
+    });
+  }
+
+  const { action, update } = req.body || {};
   try {
-    if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
-      const { kv } = await import('@vercel/kv');
-      if (action === 'add') {
-        const entry = { id: Date.now().toString(), timestamp: new Date().toISOString(), category: update.category || 'General', title: update.title, content: update.content, addedBy: 'Brandon — Skyline Admin' };
-        await kv.lpush('skyline:knowledge_updates', JSON.stringify(entry));
-        await kv.ltrim('skyline:knowledge_updates', 0, 199);
-        return res.status(200).json({ ok: true, id: entry.id });
-      }
-      if (action === 'list') {
-        const raw = await kv.lrange('skyline:knowledge_updates', 0, 49);
-        return res.status(200).json({ updates: raw.map(r => { try { return JSON.parse(r); } catch { return null; } }).filter(Boolean) });
-      }
-      if (action === 'delete') {
-        const raw = await kv.lrange('skyline:knowledge_updates', 0, -1);
-        const remaining = raw.filter(r => { try { return JSON.parse(r).id !== update.id; } catch { return true; } });
-        await kv.del('skyline:knowledge_updates');
-        if (remaining.length > 0) await kv.rpush('skyline:knowledge_updates', ...remaining);
-        return res.status(200).json({ ok: true });
-      }
-    } else {
-      console.log('[SKYLINE_KNOWLEDGE_UPDATE]', JSON.stringify(update));
-      if (action === 'list') return res.status(200).json({ updates: [] });
-      return res.status(200).json({ ok: true, warning: 'KV not configured — update logged but not persisted.' });
+    if (action === 'add') {
+      const title = clean(update?.title, 160);
+      const content = clean(update?.content, 2000);
+      if (!title || !content) return res.status(400).json({ error: 'Please fill in both the title and the content.' });
+      const category = CATEGORIES.includes(update?.category) ? update.category : 'General Knowledge';
+      const entry = {
+        id: crypto.randomUUID(),
+        timestamp: new Date().toISOString(),
+        category,
+        title,
+        content,
+        addedBy: 'Skyline Admin',
+      };
+      await redis.lpush(KEY, JSON.stringify(entry));
+      await redis.ltrim(KEY, 0, MAX_UPDATES - 1);
+      return res.status(200).json({ ok: true, id: entry.id });
     }
-  } catch (err) { return res.status(500).json({ error: err.message }); }
-  return res.status(400).json({ error: 'Unknown action' });
+
+    if (action === 'list') {
+      const raw = await redis.lrange(KEY, 0, MAX_UPDATES - 1);
+      return res.status(200).json({ updates: (raw || []).map(parseEntry).filter(Boolean) });
+    }
+
+    if (action === 'delete') {
+      const id = String(update?.id ?? '');
+      const raw = await redis.lrange(KEY, 0, -1);
+      const stored = (raw || []).find(r => String(parseEntry(r)?.id) === id);
+      if (!stored) return res.status(404).json({ error: 'That update was not found. It may already have been removed.' });
+      // Remove the exact stored string, so nothing else in the list is touched.
+      await redis.lrem(KEY, 1, stored);
+      return res.status(200).json({ ok: true });
+    }
+
+    return res.status(400).json({ error: 'Unknown action' });
+  } catch (err) {
+    console.error('KNOWLEDGE UPDATE ERROR:', err.message);
+    return res.status(500).json({ error: 'Storage error: ' + err.message });
+  }
 }
