@@ -1,29 +1,19 @@
 import Head from 'next/head';
 import Image from 'next/image';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { track, trackSessionStart } from '../lib/track';
+import { CONCOURS_LIST, FIELDS } from '../lib/concours';
 
-const CONCOURS_LIST = [
-  { id: 'ENSPY', name: 'ENSPY — Polytechnique Yaoundé', field: 'Engineering', icon: '⚙️' },
-  { id: 'FET', name: 'FET — Faculty of Engineering & Technology, UB', field: 'Engineering', icon: '⚙️' },
-  { id: 'COT', name: 'COT — College of Technology, UB', field: 'Engineering', icon: '⚙️' },
-  { id: 'ENSPD', name: 'ENSPD — Polytechnique Douala', field: 'Engineering', icon: '⚙️' },
-  { id: 'ENAFM_Medicine', name: 'ENAFM — General Medicine (FMSB/FHS)', field: 'Health Sciences', icon: '🏥' },
-  { id: 'ENAFM_Pharmacy', name: 'ENAFM — Pharmacy', field: 'Health Sciences', icon: '🏥' },
-  { id: 'ENAFM_Dentistry', name: 'ENAFM — Dentistry / Odontostomatology', field: 'Health Sciences', icon: '🏥' },
-  { id: 'FHS_Nursing', name: 'FHS Buea — Nursing', field: 'Health Sciences', icon: '🏥' },
-  { id: 'FHS_MLS', name: 'FHS Buea — Medical Laboratory Sciences', field: 'Health Sciences', icon: '🏥' },
-  { id: 'FHS_Midwifery', name: 'FHS Buea — Midwifery', field: 'Health Sciences', icon: '🏥' },
-  { id: 'FHS_BMS', name: 'FHS Buea — Biomedical Sciences', field: 'Health Sciences', icon: '🏥' },
-  { id: 'FHS_PublicHealth', name: 'FHS Buea — Public Health', field: 'Health Sciences', icon: '🏥' },
-  { id: 'FASA', name: 'FASA — Faculty of Agriculture, Dschang', field: 'Agriculture', icon: '🌱' },
-  { id: 'FAVM', name: 'FAVM — Faculty of Agriculture & Vet Medicine, UB', field: 'Agriculture', icon: '🌱' },
-  { id: 'ESMV', name: 'ESMV — School of Veterinary Medicine, Ngaoundéré', field: 'Agriculture', icon: '🌱' },
-  { id: 'ENAM', name: 'ENAM — National School of Administration & Magistracy', field: 'Administration', icon: '⚖️' },
-  { id: 'EMIA', name: 'EMIA — Combined Military Academy', field: 'Military', icon: '🎖️' },
-  { id: 'ENIEG', name: 'ENIEG/GTTC — Teacher Training (Primary)', field: 'Education', icon: '📚' },
-];
-
-const FIELDS = [...new Set(CONCOURS_LIST.map(c => c.field))];
+// Turns any API reply into data or a readable error. A Vercel timeout returns an
+// HTML page rather than JSON, which used to surface as a generic failure.
+async function readReply(res) {
+  let data = null;
+  try { data = await res.json(); } catch { data = null; }
+  if (res.ok && data && !data.error) return data;
+  if (res.status === 504) return { error: 'Skylar took too long to answer. Please try again in a moment.' };
+  if (res.status === 429) return { error: 'Skylar is very busy right now. Please wait a minute and try again.' };
+  return { error: (data && data.error) || 'Something went wrong. Please try again.' };
+}
 
 export default function ConcoursPage() {
   const [selectedField, setSelectedField] = useState('All');
@@ -32,47 +22,58 @@ export default function ConcoursPage() {
   const [globalData, setGlobalData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [tab, setTab] = useState('guide'); // 'guide' | 'global'
+  const latest = useRef(0); // ignores replies from an exam the student has already left
+
+  useEffect(() => { trackSessionStart(); }, []);
 
   const filtered = selectedField === 'All'
     ? CONCOURS_LIST
     : CONCOURS_LIST.filter(c => c.field === selectedField);
 
   async function loadGuide(concours) {
+    const req = ++latest.current;
     setSelectedConcours(concours);
     setGuide(null);
     setGlobalData(null);
     setTab('guide');
     setLoading(true);
+    track('concours_viewed', { concours: concours.id });
+    let data;
     try {
       const res = await fetch('/api/match', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'concours', concours: concours.name })
+        body: JSON.stringify({ type: 'concours', concours: concours.name, concoursId: concours.id })
       });
-      const data = await res.json();
-      setGuide(data);
+      data = await readReply(res);
     } catch (e) {
-      setGuide({ error: 'Failed to load. Please try again.' });
+      data = { error: 'Could not reach Skylar. Please check your connection and try again.' };
     }
+    if (req !== latest.current) return;
+    setGuide(data);
     setLoading(false);
   }
 
   async function loadGlobal() {
-    if (!guide) return;
+    if (!guide || guide.error) return;
     setTab('global');
-    if (globalData) return;
+    if (globalData && !globalData.error) return;
+    const req = latest.current;
+    setGlobalData(null);
     setLoading(true);
+    let data;
     try {
       const res = await fetch('/api/match', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'global', field: guide.field || selectedConcours.field })
+        body: JSON.stringify({ type: 'global', field: selectedConcours.field })
       });
-      const data = await res.json();
-      setGlobalData(data);
+      data = await readReply(res);
     } catch (e) {
-      setGlobalData({ error: 'Failed to load. Please try again.' });
+      data = { error: 'Could not reach Skylar. Please check your connection and try again.' };
     }
+    if (req !== latest.current) return;
+    setGlobalData(data);
     setLoading(false);
   }
 
@@ -82,7 +83,7 @@ export default function ConcoursPage() {
         <title>Concours Guide — Skyline Academy</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
       </Head>
-      <style>{`
+      <style dangerouslySetInnerHTML={{__html:`
         :root {
           --navy: #0E7C8A; --navy-mid: #14A3B3; --navy-light: #5CC8D6;
           --amber: #F7941E; --cream: #F8F6F1; --gray-light: #E8E6E1;
@@ -156,7 +157,7 @@ export default function ConcoursPage() {
           .sidebar { border-right: none; border-bottom: 1px solid var(--gray-light); max-height: 280px; }
           .grid2 { grid-template-columns: 1fr; }
         }
-      `}</style>
+      `}} />
 
       <header className="header">
         <Image src="/skyline-logo.jpeg" alt="Skyline" width={36} height={36} style={{borderRadius:6,objectFit:'contain'}} />
@@ -235,7 +236,7 @@ export default function ConcoursPage() {
                           <div className="paper-subject">{p.subject}</div>
                           <div className="paper-meta">
                             {p.duration && <span className="paper-chip">{p.duration}</span>}
-                            {p.coefficient && <span className="paper-chip coeff">Coeff {p.coefficient}</span>}
+                            {p.coefficient > 0 && <span className="paper-chip coeff">Coeff {p.coefficient}</span>}
                             {p.questions && <span className="paper-chip">{p.questions}</span>}
                           </div>
                         </div>
@@ -439,9 +440,17 @@ export default function ConcoursPage() {
                 </>
               )}
 
-              {!loading && guide?.error && (
+              {!loading && tab === 'guide' && guide?.error && (
                 <div style={{background:'#fdecea',border:'1px solid #f5c6c4',color:'var(--red)',padding:20,borderRadius:12,textAlign:'center'}}>
                   {guide.error}
+                  <div><button className="btn-global" style={{marginTop:12}} onClick={() => loadGuide(selectedConcours)}>Try again</button></div>
+                </div>
+              )}
+
+              {!loading && tab === 'global' && globalData?.error && (
+                <div style={{background:'#fdecea',border:'1px solid #f5c6c4',color:'var(--red)',padding:20,borderRadius:12,textAlign:'center'}}>
+                  {globalData.error}
+                  <div><button className="btn-global" style={{marginTop:12}} onClick={loadGlobal}>Try again</button></div>
                 </div>
               )}
             </>
