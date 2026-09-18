@@ -1,0 +1,17 @@
+# dependencies
+node_modules/
+
+# Next.js build output
+.next/
+out/
+
+# local environment files (never commit secrets)
+.env
+.env*.local
+
+# Vercel
+.vercel/
+
+# OS files
+.DS_Store
+Thumbs.db
