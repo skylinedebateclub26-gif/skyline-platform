@@ -125,7 +125,7 @@ export default function CareerMatch() {
         .career-card.top-match { border-color:var(--amber); }
         .card-top { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:14px; }
         .top-badge-pill { display:inline-block; background:var(--amber); color:var(--navy); font-size:11px; font-weight:700; padding:3px 10px; border-radius:20px; margin-bottom:6px; }
-        .career-title { font-size:18px; font-weight:700; color:var(--navy); line-height:1.2; margin-bottom:3px; }
+        .career-title { font-size:18px; font-weight:700; color:var(--navy); line-height:1.2; margin-bottom:3px; overflow-wrap:anywhere; }
         .career-field { font-size:13px; color:var(--gray-text); }
         .score-circle { width:62px; height:62px; border-radius:50%; display:flex; align-items:center; justify-content:center; flex-direction:column; flex-shrink:0; border:3px solid var(--gray-light); }
         .score-circle .score-num { font-size:20px; font-weight:700; color:var(--navy); line-height:1; }
@@ -154,6 +154,17 @@ export default function CareerMatch() {
         .cd-item { }
         .cd-label { font-size:10px; color:var(--gray-text); font-weight:600; text-transform:uppercase; letter-spacing:.05em; }
         .cd-value { font-size:13px; color:var(--navy); font-weight:500; line-height:1.4; }
+        .card-why.pending { display:flex; flex-direction:column; gap:8px; }
+        .card-why.missing { color:var(--gray-text); font-style:italic; }
+        .skeleton { display:block; height:10px; border-radius:5px; background:linear-gradient(90deg, var(--gray-light) 25%, #f6f2ea 50%, var(--gray-light) 75%); background-size:200% 100%; animation:shimmer 1.4s ease-in-out infinite; }
+        .skeleton.short { width:60%; }
+        @keyframes shimmer { from { background-position:200% 0; } to { background-position:-200% 0; } }
+        .why-wait { font-size:12px; color:var(--gray-text); }
+        .entry-path { font-size:13px; color:var(--navy); line-height:1.5; margin:-4px 0 12px; }
+        .entry-label { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--gray-text); margin-right:6px; }
+        .entry-path:empty { display:none; }
+        .results-note { background:var(--cream); border:1px solid var(--gray-light); border-radius:var(--radius-sm); padding:12px 14px; font-size:13px; color:var(--gray-text); line-height:1.55; margin-bottom:14px; }
+        @media (prefers-reduced-motion: reduce) { .skeleton { animation:none; } }
         .global-pill { display:inline-block; background:rgba(14,124,138,.08); border:1px solid rgba(14,124,138,.2); color:var(--navy); font-size:13px; padding:10px 14px; border-radius:var(--radius-sm); line-height:1.55; margin-bottom:12px; }
         .result-footer { text-align:center; margin-top:32px; padding-top:24px; border-top:1px solid var(--gray-light); }
         .result-footer p { font-size:14px; color:var(--gray-text); margin-bottom:16px; }
@@ -556,6 +567,7 @@ export default function CareerMatch() {
           </div>
           <div className="careers-label">Your matches — ranked by compatibility</div>
           <div id="career-cards"></div>
+          <div id="results-note" className="results-note" style={{display:'none'}}>Skylar could not finish every explanation this time. Your matches, scores and exam facts above are complete. You can retake the assessment later for the full report.</div>
           <div className="result-footer">
             <p>These results are based on your full psychological and academic profile.<br/>Discuss them with a Skyline Academy counsellor to plan your next steps.</p>
             <div className="footer-btns">
@@ -718,31 +730,78 @@ export default function CareerMatch() {
           window._submitting = true;
           const slowTimer = setTimeout(function() {
             const sub = document.querySelector('#step-7 .loading-sub');
-            if (sub) sub.textContent = 'Still working. A full report usually takes about a minute, so please keep this page open.';
+            if (sub) sub.textContent = 'Still working. When many students are online this can take a little longer, so please keep this page open.';
           }, 25000);
+          let shown = false;
           try {
             const res = await fetch('/api/match',{
               method:'POST',
               headers:{'Content-Type':'application/json'},
-              body: JSON.stringify({type:'match', profile:window._answers})
+              body: JSON.stringify({type:'match', profile:window._answers, stream:true})
             });
-            let data = null;
-            try { data = await res.json(); } catch (_) { data = null; }
-            if (!res.ok || !data || data.error) {
-              const fallback = res.status === 504 ? 'Skylar took too long to answer. Please try again.' : 'Server error ' + res.status + '. Please try again.';
-              throw new Error((data && data.error) || fallback);
+            const kind = res.headers.get('content-type') || '';
+            if (!res.ok || kind.indexOf('ndjson') === -1) {
+              let data = null;
+              try { data = await res.json(); } catch (_) { data = null; }
+              if (!res.ok || !data || data.error) {
+                const fallback = res.status === 504 ? 'Skylar took too long to answer. Please try again.' : 'Server error ' + res.status + '. Please try again.';
+                throw new Error((data && data.error) || fallback);
+              }
+              window.renderResults(data, false);
+              shown = true;
+              window.finishResults(false);
+              return;
             }
-            window.renderResults(data);
+            // Streamed answer: the matches arrive first, then one explanation at a time.
+            let finished = false;
+            await window.readLines(res, function(line) {
+              if (!line.trim()) return;
+              const ev = JSON.parse(line);
+              if (ev.type === 'plan') { window.renderResults(ev.data, true); shown = true; }
+              else if (ev.type === 'career') window.fillCareer(ev.index, ev.data, ev.error);
+              else if (ev.type === 'done') finished = true;
+            });
+            if (!shown) throw new Error('Skylar did not send any results. Please try again.');
+            window.finishResults(!finished);
           } catch(e) {
-            document.querySelector('#step-7 .loading-wrap').innerHTML =
-              '<div style="background:var(--red-light);border:1px solid #f5c6c4;color:var(--red);padding:20px;border-radius:12px;text-align:center"><strong>Something went wrong.</strong><br/>'+esc(e.message||'Please try again.')+'<br/><br/><button class="btn btn-secondary" onclick="window.goTo(6)" style="margin:0 auto;display:block">← Go back and retry</button></div>';
+            if (shown) {
+              window.finishResults(true);
+            } else {
+              document.querySelector('#step-7 .loading-wrap').innerHTML =
+                '<div style="background:var(--red-light);border:1px solid #f5c6c4;color:var(--red);padding:20px;border-radius:12px;text-align:center"><strong>Something went wrong.</strong><br/>'+esc(e.message||'Please try again.')+'<br/><br/><button class="btn btn-secondary" onclick="window.goTo(6)" style="margin:0 auto;display:block">← Go back and retry</button></div>';
+            }
           } finally {
             clearTimeout(slowTimer);
             window._submitting = false;
           }
         };
 
-        window.renderResults = function(data) {
+        // Reads a streamed response one line at a time. Browsers without stream
+        // support simply get the whole answer at the end.
+        window.readLines = async function(res, handle) {
+          if (!res.body || !res.body.getReader || typeof TextDecoder === 'undefined') {
+            (await res.text()).split('\\n').forEach(handle);
+            return;
+          }
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = '';
+          for (;;) {
+            const part = await reader.read();
+            if (part.done) break;
+            buf += decoder.decode(part.value, {stream:true});
+            let nl = buf.indexOf('\\n');
+            while (nl >= 0) {
+              handle(buf.slice(0, nl));
+              buf = buf.slice(nl + 1);
+              nl = buf.indexOf('\\n');
+            }
+          }
+          buf += decoder.decode();
+          handle(buf);
+        };
+
+        window.renderResults = function(data, streaming) {
           document.getElementById('result-headline').textContent = data.headline||'Your career matches are ready';
           document.getElementById('result-summary').textContent = data.summary||'';
           const badges = document.getElementById('profile-badges');
@@ -753,61 +812,65 @@ export default function CareerMatch() {
             b.textContent=tag;
             badges.appendChild(b);
           });
+          const note = document.getElementById('results-note');
+          if (note) note.style.display = 'none';
           const container = document.getElementById('career-cards');
           container.innerHTML='';
-          const sorted=(data.careers||[]).map(c=>Object.assign({},c,{score:pct(c.score)})).sort((a,b)=>b.score-a.score);
-          if (window.track && sorted[0]) {
-            window.track('career_match_completed', {top_career: sorted[0].title, top_field: sorted[0].field, stream: window._selectedStream || ''});
-          }
+          const sorted=(data.careers||[]).map((c,i)=>Object.assign({},c,{score:pct(c.score), idx:(c.index==null?i:c.index)})).sort((a,b)=>b.score-a.score);
+          window._results = {top: sorted[0] || null, tracked: false};
           sorted.forEach((c,i)=>{
             const isTop=i===0;
             const sc=c.score>=75?'high':c.score>=55?'mid':'';
             const bc=c.score>=75?'bar-green':c.score>=55?'bar-amber':'bar-navy';
             const cd=c.concours_detail||{};
-            const gp=c.global_perspective||'';
             const card=document.createElement('div');
             card.className='career-card'+(isTop?' top-match':'');
+            card.dataset.idx=String(c.idx);
+            card.dataset.pos=String(i);
 
-            // Concours detail grid
+            // Exam facts come from Skyline's knowledge base, attached by the server.
             const cdItems=[
               ['Exam format',cd.exam_format],
               ['Places',cd.places],
               ['Centres',cd.centres],
               ['Fee',cd.fee],
               ['Age limit',cd.age_limit],
-              ['Deadline',cd.deadline],
+              ['Exam date',cd.exam_date],
               ['Key subjects',(cd.key_subjects||[]).join(', ')],
-              ['Eligibility note',cd.eligibility_note]
-            ].filter(([,v])=>v);
+              ['Eligibility',cd.eligibility],
+              ['Registration',cd.registration],
+              ['Good to know',cd.notes]
+            ].filter(function(item){ return item[1]; });
 
-            const cdHTML = cdItems.length ? \`
-              <div class="concours-detail-box">
-                <div class="concours-detail-title">📋 Concours at a glance</div>
-                <div class="concours-detail-grid">
-                  \${cdItems.map(([l,v])=>\`<div class="cd-item"><div class="cd-label">\${esc(l)}</div><div class="cd-value">\${esc(v)}</div></div>\`).join('')}
-                </div>
-              </div>\` : '';
+            const cdHTML = cdItems.length
+              ? '<div class="concours-detail-box"><div class="concours-detail-title">📋 '+esc(cd.exam || 'Concours at a glance')+'</div><div class="concours-detail-grid">'+
+                cdItems.map(function(item){ return '<div class="cd-item"><div class="cd-label">'+esc(item[0])+'</div><div class="cd-value">'+esc(item[1])+'</div></div>'; }).join('')+
+                '</div></div>'
+              : '';
 
-            const gpHTML = gp ? \`<div class="global-pill">🌍 <strong>Globally:</strong> \${esc(gp)}</div>\` : '';
+            const dim = function(pre, label){
+              return '<div class="dim-bar-item"><div class="dim-bar-label">'+label+'</div><div class="dim-bar-track"><div class="dim-bar-fill" id="'+pre+'-'+i+'" data-w="0%"></div></div></div>';
+            };
 
             card.innerHTML=
               (isTop?'<div class="top-badge-pill">★ Best match</div>':'')+
               '<div class="card-top"><div>'+
               '<div class="career-title">'+esc(c.title)+'</div>'+
-              '<div class="career-field">'+esc(c.field)+(c.civil_service?' · Fonctionnaire track':'')+' · '+esc(c.duration)+'</div>'+
+              '<div class="career-field">'+esc(c.field)+(c.civil_service?' · Fonctionnaire track':'')+'<span class="c-duration"></span></div>'+
               '</div><div class="score-circle '+sc+'"><div class="score-num" id="sn-'+i+'">0</div><div class="score-pct">match</div></div></div>'+
               '<div class="bar-wrap"><div class="bar-label"><span>Overall compatibility</span><span>'+c.score+'%</span></div><div class="bar-track"><div class="bar-fill '+bc+'" id="bf-'+i+'" style="width:0%"></div></div></div>'+
-              '<div class="dim-bars">'+
-              '<div class="dim-bar-item"><div class="dim-bar-label">Personality</div><div class="dim-bar-track"><div class="dim-bar-fill" id="dp-'+i+'" data-w="'+pct(c.score_breakdown?.personality_fit)+'%"></div></div></div>'+
-              '<div class="dim-bar-item"><div class="dim-bar-label">Values</div><div class="dim-bar-track"><div class="dim-bar-fill" id="dv-'+i+'" data-w="'+pct(c.score_breakdown?.values_alignment)+'%"></div></div></div>'+
-              '<div class="dim-bar-item"><div class="dim-bar-label">Academic fit</div><div class="dim-bar-track"><div class="dim-bar-fill" id="da-'+i+'" data-w="'+pct(c.score_breakdown?.academic_match)+'%"></div></div></div>'+
-              '</div>'+
-              '<div class="card-why" style="margin-top:14px">'+esc(c.why)+'</div>'+
+              '<div class="dim-bars">'+dim('dp','Personality')+dim('dv','Values')+dim('da','Academic fit')+'</div>'+
+              '<div class="card-why pending" style="margin-top:14px"><span class="skeleton"></span><span class="skeleton"></span><span class="skeleton short"></span><span class="why-wait">Skylar is writing why this career fits you…</span></div>'+
               '<div class="concours-label" style="margin-top:8px">How to enter in Cameroon</div>'+
               '<div class="concours-chips">'+(c.concours||[]).map(x=>'<span class="concours-chip">'+esc(x)+'</span>').join('')+'</div>'+
+              '<div class="entry-path"></div>'+
               cdHTML+
-              gpHTML;
+              '<div class="c-global"></div>';
             container.appendChild(card);
+            if (!streaming) {
+              const ready = typeof c.why === 'string' && c.why !== '';
+              window.fillCareer(c.idx, ready ? c : null, ready ? '' : 'Skylar could not finish this explanation. Please try again later.');
+            }
           });
           window.goTo(8);
           setTimeout(()=>{
@@ -821,6 +884,48 @@ export default function CareerMatch() {
               },i*180);
             });
           },200);
+        };
+
+        // Adds one career's explanation once Skylar has written it.
+        window.fillCareer = function(idx, d, error) {
+          const card = document.querySelector('#career-cards .career-card[data-idx="'+Number(idx)+'"]');
+          if (!card) return;
+          const why = card.querySelector('.card-why');
+          if (!why || !why.classList.contains('pending')) return;
+          why.classList.remove('pending');
+          if (!d) {
+            why.classList.add('missing');
+            why.textContent = error || 'Skylar could not finish this explanation.';
+            return;
+          }
+          why.textContent = d.why || '';
+          if (d.duration) card.querySelector('.c-duration').textContent = ' · ' + d.duration;
+          if (d.entry_path) card.querySelector('.entry-path').innerHTML = '<span class="entry-label">Route</span>'+esc(d.entry_path);
+          if (d.global_perspective) card.querySelector('.c-global').innerHTML = '<div class="global-pill">🌍 <strong>Globally:</strong> '+esc(d.global_perspective)+'</div>';
+          const b = d.score_breakdown || {};
+          const pos = card.dataset.pos;
+          [['dp',b.personality_fit],['dv',b.values_alignment],['da',b.academic_match]].forEach(function(pair) {
+            const el = document.getElementById(pair[0]+'-'+pos);
+            if (!el) return;
+            el.dataset.w = pct(pair[1])+'%';
+            if (card.classList.contains('visible')) el.style.width = el.dataset.w;
+          });
+        };
+
+        // Runs once the answer is complete, or when the connection ends early.
+        window.finishResults = function(incomplete) {
+          const waiting = document.querySelectorAll('#career-cards .card-why.pending');
+          waiting.forEach(function(el) {
+            window.fillCareer(el.closest('.career-card').dataset.idx, null, 'Skylar could not finish this explanation. Please try again later.');
+          });
+          const missing = document.querySelectorAll('#career-cards .card-why.missing').length;
+          const note = document.getElementById('results-note');
+          if (note) note.style.display = (incomplete || missing) ? 'block' : 'none';
+          const r = window._results;
+          if (window.track && r && r.top && !r.tracked) {
+            r.tracked = true;
+            window.track('career_match_completed', {top_career: r.top.title, top_field: r.top.field, stream: window._selectedStream || ''});
+          }
         };
 
         window.animNum = function(id,from,to,dur) {

@@ -2,6 +2,37 @@ import Head from 'next/head';
 import { useState, useEffect } from 'react';
 import { CONCOURS_LIST, FIELDS } from '../lib/concours';
 
+// Speed figures for the dashboard, from the timing records Skylar keeps in Redis.
+function median(values) {
+  const v = values.filter(n => Number.isFinite(n)).sort((a, b) => a - b);
+  if (!v.length) return null;
+  const mid = Math.floor(v.length / 2);
+  return v.length % 2 ? v[mid] : Math.round((v[mid - 1] + v[mid]) / 2);
+}
+
+const secs = ms => (Number.isFinite(ms) ? `${(ms / 1000).toFixed(1)} s` : 'No data yet');
+
+function speedSummary(speed) {
+  const recent = (speed?.match || []).slice(0, 20);
+  const runs = recent.filter(m => Number.isFinite(m.first_ms));
+  const problems = recent.filter(m => !m.ok).length;
+  const guides = (speed?.guide || []).slice(0, 50).filter(g => g.ok);
+  const fresh = guides.filter(g => g.cache !== 'hit');
+  const ready = guides.filter(g => g.cache === 'hit');
+  return [
+    ['Career Match, first results', secs(median(runs.map(m => m.first_ms))), `median of the last ${runs.length}`],
+    ['Career Match, full report', secs(median(runs.map(m => m.total_ms))), `${problems} of the last ${recent.length} had a problem`],
+    ['Guide written on the spot', secs(median(fresh.map(g => g.total_ms))), `median of the last ${fresh.length}`],
+    ['Guide already prepared', secs(median(ready.map(g => g.total_ms))), `median of the last ${ready.length}`],
+  ];
+}
+
+function speedNote(m) {
+  if (m.error) return `Failed (${m.error})`;
+  if (m.details_failed) return `${m.details_failed} explanation(s) missing`;
+  return m.model;
+}
+
 export default function AdminDashboard() {
   const [authed, setAuthed] = useState(false);
   const [checking, setChecking] = useState(true);
@@ -220,6 +251,14 @@ export default function AdminDashboard() {
         .bar-fill { height:100%; border-radius:4px; transition:width .8s; }
         .bar-count { font-size:13px; font-weight:700; color:#0E7C8A; min-width:32px; text-align:right; }
         .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+        .speed-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:16px; }
+        .speed-item { background:#F4F8F9; border-radius:10px; padding:14px; }
+        .speed-num { font-size:22px; font-weight:700; color:#0E7C8A; }
+        .speed-label { font-size:12px; font-weight:600; color:#1B2A3A; margin-top:4px; }
+        .speed-hint { font-size:11px; color:#7A776F; margin-top:2px; }
+        .speed-table { width:100%; border-collapse:collapse; font-size:13px; }
+        .speed-table th { text-align:left; color:#7A776F; font-weight:600; padding:6px 8px; border-bottom:1px solid #E8E6E0; }
+        .speed-table td { padding:6px 8px; border-bottom:1px solid #F1EFEA; }
         /* Knowledge panel */
         .ku-form label { display:block; font-size:12px; font-weight:700; color:#7A776F; text-transform:uppercase; letter-spacing:.05em; margin-bottom:6px; }
         .ku-form select, .ku-form input, .ku-form textarea { width:100%; padding:11px 14px; border:1.5px solid #E8E6E1; border-radius:8px; font-size:14px; font-family:inherit; color:#1a1a2e; background:#F8F6F1; transition:border .15s; margin-bottom:16px; }
@@ -248,7 +287,7 @@ export default function AdminDashboard() {
         .skylar-note { background:rgba(14,124,138,.05); border:1.5px solid rgba(14,124,138,.15); border-radius:10px; padding:16px; margin-bottom:20px; display:flex; gap:12px; align-items:flex-start; }
         .skylar-dot { width:34px; height:34px; background:linear-gradient(135deg,#0E7C8A,#14A3B3); border-radius:50%; display:flex; align-items:center; justify-content:center; color:white; font-size:13px; font-weight:700; flex-shrink:0; }
         .no-kv-banner { background:#FFF8E7; border:1.5px solid rgba(247,148,30,.3); border-radius:10px; padding:16px; margin-bottom:20px; font-size:14px; color:#9a5a00; line-height:1.6; }
-        @media (max-width:768px) { .stat-grid { grid-template-columns:1fr 1fr; } .grid2 { grid-template-columns:1fr; } }
+        @media (max-width:768px) { .stat-grid { grid-template-columns:1fr 1fr; } .grid2 { grid-template-columns:1fr; } .speed-grid { grid-template-columns:1fr 1fr; } }
       `}} />
 
       <div className="header">
@@ -338,6 +377,34 @@ export default function AdminDashboard() {
                   </div>
                 )) : <div className="empty-state">No data yet</div>}
               </div>
+            </div>
+
+            <div className="card" style={{marginTop:20}}>
+              <div className="card-title">⏱ Skylar speed</div>
+              <div className="speed-grid">
+                {speedSummary(stats.speed).map(([label, value, hint]) => (
+                  <div key={label} className="speed-item">
+                    <div className="speed-num">{value}</div>
+                    <div className="speed-label">{label}</div>
+                    <div className="speed-hint">{hint}</div>
+                  </div>
+                ))}
+              </div>
+              {(stats.speed?.match || []).length ? (
+                <table className="speed-table">
+                  <thead><tr><th>When</th><th>First results</th><th>Full report</th><th>Notes</th></tr></thead>
+                  <tbody>
+                    {stats.speed.match.slice(0, 8).map((m, i) => (
+                      <tr key={`${m.at}-${i}`}>
+                        <td>{new Date(m.at).toLocaleString()}</td>
+                        <td>{Number.isFinite(m.first_ms) ? secs(m.first_ms) : '-'}</td>
+                        <td>{secs(m.total_ms)}</td>
+                        <td>{speedNote(m)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : <div className="empty-state" style={{padding:16}}>Career Match timings appear here after the first student finishes.</div>}
             </div>
           </>)}
         </>)}
