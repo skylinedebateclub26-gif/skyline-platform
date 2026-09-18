@@ -25,7 +25,7 @@ export default async function handler(req, res) {
 
   try {
     const top = key => redis.zrange(key, 0, 9, { rev: true, withScores: true });
-    const [sessions, assessments, concoursViews, careers, concours, fields, streams, events, activeWeek] = await Promise.all([
+    const [sessions, assessments, concoursViews, careers, concours, fields, streams, events, activeWeek, matchSpeed, guideSpeed] = await Promise.all([
       redis.get('skyline:stats:total_sessions'),
       redis.get('skyline:stats:total_assessments'),
       redis.get('skyline:stats:total_concours_views'),
@@ -36,6 +36,9 @@ export default async function handler(req, res) {
       redis.lrange('skyline:events', 0, 49),
       // Distinct browser sessions seen over the last 7 days (one HyperLogLog per day).
       redis.pfcount(...lastDays(7).map(day => `skyline:active:${day}`)),
+      // Timing records written by pages/api/match.js, newest first.
+      redis.lrange('skyline:perf:match', 0, 99),
+      redis.lrange('skyline:perf:guide', 0, 99),
     ]);
 
     return res.status(200).json({
@@ -48,6 +51,10 @@ export default async function handler(req, res) {
         top_concours: pairs(concours),
         top_fields: pairs(fields),
         streams: pairs(streams),
+        speed: {
+          match: (matchSpeed || []).map(parseEntry).filter(Boolean),
+          guide: (guideSpeed || []).map(parseEntry).filter(Boolean),
+        },
       },
       recent_events: (events || []).map(parseEntry).filter(Boolean),
     });
